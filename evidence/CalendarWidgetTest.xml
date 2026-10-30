@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="me.proton.android.calendar.CalendarWidgetTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-10-29T21:52:02" hostname="sanitized-host" time="4.016">
+  <properties/>
+  <testcase name="next midnight uses the current local time zone across daylight saving change()" classname="me.proton.android.calendar.CalendarWidgetTest" time="0.033"/>
+  <testcase name="event list refresh also refreshes header()" classname="me.proton.android.calendar.CalendarWidgetTest" time="3.778"/>
+  <testcase name="midnight alarm is exact when access is available()" classname="me.proton.android.calendar.CalendarWidgetTest" time="0.187"/>
+  <testcase name="midnight alarm falls back when exact alarm access is unavailable()" classname="me.proton.android.calendar.CalendarWidgetTest" time="0.01"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

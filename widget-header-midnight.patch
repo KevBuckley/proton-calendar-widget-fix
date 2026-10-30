@@ -1,0 +1,261 @@
+diff --git a/app/src/main/java/me/proton/android/calendar/CalendarWidget.kt b/app/src/main/java/me/proton/android/calendar/CalendarWidget.kt
+index b3a5800e..f73947ec 100644
+--- a/app/src/main/java/me/proton/android/calendar/CalendarWidget.kt
++++ b/app/src/main/java/me/proton/android/calendar/CalendarWidget.kt
+@@ -1,5 +1,6 @@
+ package me.proton.android.calendar
+ 
++import android.app.AlarmManager
+ import android.app.PendingIntent
+ import android.app.TaskStackBuilder
+ import android.appwidget.AppWidgetManager
+@@ -52,6 +53,7 @@ import org.koin.core.KoinComponent
+ import org.koin.core.inject
+ import java.time.LocalDate
+ import java.time.ZoneId
++import java.time.ZonedDateTime
+ import javax.inject.Inject
+ 
+ interface WidgetRefresher {
+@@ -76,11 +78,42 @@ class CalendarWidgetRefresher @Inject constructor(@ApplicationContext private va
+         val widgetManager = AppWidgetManager.getInstance(context)
+         val widgetComponent = ComponentName(context, CalendarWidget::class.java)
+         val widgetIds = widgetManager.getAppWidgetIds(widgetComponent)
++        val localDate = LocalDate.now(ZoneId.systemDefault())
++        val remoteViews = RemoteViews(BuildConfig.APPLICATION_ID, R.layout.calendar_widget)
+ 
+-        widgetManager.notifyAppWidgetViewDataChanged(widgetIds, R.id.lv_widget)
++        refreshWidgetHeaderAndEventList(
++            widgetManager,
++            widgetIds,
++            remoteViews,
++            localDate.formatDayOfWeek(),
++            formatMonthAndDay(context, localDate)
++        )
+     }
+ }
+ 
++internal fun refreshWidgetHeaderAndEventList(
++    widgetManager: AppWidgetManager,
++    widgetIds: IntArray,
++    remoteViews: RemoteViews,
++    dayOfWeek: String,
++    monthAndDay: String
++) {
++    setWidgetHeader(remoteViews, dayOfWeek, monthAndDay)
++    widgetManager.partiallyUpdateAppWidget(widgetIds, remoteViews)
++    widgetManager.notifyAppWidgetViewDataChanged(widgetIds, R.id.lv_widget)
++}
++
++private fun setWidgetHeader(remoteViews: RemoteViews, dayOfWeek: String, monthAndDay: String) {
++    remoteViews.setTextViewText(R.id.tv_header_text, dayOfWeek)
++    remoteViews.setTextViewText(R.id.tv_main_text, monthAndDay)
++}
++
++private fun formatMonthAndDay(context: Context, localDate: LocalDate): String = DateUtils.formatDateTime(
++    context,
++    localDate.toDate(ZoneId.systemDefault().id).time,
++    DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_NO_YEAR
++)
++
+ /**
+  * App Widget showing upcoming Events
+  */
+@@ -94,7 +127,8 @@ class CalendarWidget : AppWidgetProvider(), KoinComponent {
+                 it.action == Intent.ACTION_TIME_CHANGED ||
+                 it.action == Intent.ACTION_TIMEZONE_CHANGED ||
+                 it.action == Intent.ACTION_DATE_CHANGED ||
+-                it.action == Intent.ACTION_LOCALE_CHANGED) {
++                it.action == Intent.ACTION_LOCALE_CHANGED ||
++                it.action == ACTION_MIDNIGHT_UPDATE) {
+ 
+                 val widgetManager = AppWidgetManager.getInstance(context)
+                 val widgetComponent = ComponentName(context, CalendarWidget::class.java)
+@@ -113,22 +147,28 @@ class CalendarWidget : AppWidgetProvider(), KoinComponent {
+             updateAppWidget(context, appWidgetManager, appWidgetId)
+         }
+ 
++        scheduleNextMidnightUpdate(context)
++
+         super.onUpdate(context, appWidgetManager, appWidgetIds)
+     }
+ 
++    override fun onEnabled(context: Context) {
++        scheduleNextMidnightUpdate(context)
++        super.onEnabled(context)
++    }
++
++    override fun onDisabled(context: Context) {
++        cancelMidnightUpdate(context)
++        super.onDisabled(context)
++    }
++
+     private fun updateAppWidget(context: Context, appWidgetManager: AppWidgetManager, appWidgetId: Int) {
+ 
+         val remoteViews = RemoteViews(BuildConfig.APPLICATION_ID, R.layout.calendar_widget)
+ 
+         // format current date
+         val localDate = LocalDate.now(ZoneId.systemDefault())
+-        remoteViews.setTextViewText(R.id.tv_header_text, localDate.formatDayOfWeek())
+-        val monthAndDay: String = DateUtils.formatDateTime(
+-            context,
+-            localDate.toDate(ZoneId.systemDefault().id).time,
+-            DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_NO_YEAR
+-        )
+-        remoteViews.setTextViewText(R.id.tv_main_text, monthAndDay)
++        setWidgetHeader(remoteViews, localDate.formatDayOfWeek(), formatMonthAndDay(context, localDate))
+ 
+         val pendingIntentFlags =
+             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+@@ -216,6 +256,8 @@ class CalendarWidget : AppWidgetProvider(), KoinComponent {
+     companion object {
+ 
+         const val WIDGET_DAYS_AHEAD = 14
++        internal const val ACTION_MIDNIGHT_UPDATE = "me.proton.android.calendar.action.WIDGET_MIDNIGHT_UPDATE"
++        private const val MIDNIGHT_UPDATE_REQUEST_CODE = 1
+ 
+         private fun createWidgetRefreshIntent(context: Context): Intent {
+             val widgetManager = AppWidgetManager.getInstance(context)
+@@ -236,10 +278,59 @@ class CalendarWidget : AppWidgetProvider(), KoinComponent {
+             context.sendBroadcast(createWidgetRefreshIntent(context))
+         }
+ 
++        /**
++         * Schedules a one-shot update for the next local midnight. Exact delivery is used when
++         * permitted; otherwise Android may defer the fallback alarm while the device is idle.
++         * Every full widget update schedules the following midnight again.
++         */
++        fun scheduleNextMidnightUpdate(context: Context) {
++            val widgetManager = AppWidgetManager.getInstance(context)
++            val widgetComponent = ComponentName(context, CalendarWidget::class.java)
++            if (widgetManager.getAppWidgetIds(widgetComponent).isEmpty()) return
++
++            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
++            scheduleMidnightAlarm(
++                alarmManager,
++                createMidnightUpdatePendingIntent(context),
++                nextMidnightMillis(ZonedDateTime.now(ZoneId.systemDefault())),
++                Build.VERSION.SDK_INT < Build.VERSION_CODES.S || alarmManager.canScheduleExactAlarms()
++            )
++        }
++
++        private fun cancelMidnightUpdate(context: Context) {
++            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
++            alarmManager.cancel(createMidnightUpdatePendingIntent(context))
++        }
++
++        private fun createMidnightUpdatePendingIntent(context: Context): PendingIntent =
++            PendingIntent.getBroadcast(
++                context,
++                MIDNIGHT_UPDATE_REQUEST_CODE,
++                Intent(context, CalendarWidget::class.java).setAction(ACTION_MIDNIGHT_UPDATE),
++                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
++            )
++
+     }
+ 
+ }
+ 
++internal fun nextMidnightMillis(now: ZonedDateTime): Long =
++    now.toLocalDate().plusDays(1).atStartOfDay(now.zone).toInstant().toEpochMilli()
++
++internal fun scheduleMidnightAlarm(
++    alarmManager: AlarmManager,
++    pendingIntent: PendingIntent,
++    triggerAtMillis: Long,
++    canScheduleExactAlarm: Boolean
++) {
++    if (canScheduleExactAlarm) {
++        alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
++    } else {
++        // Best effort without exact-alarm access. Doze and app standby can delay delivery.
++        alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
++    }
++}
++
+ internal class CalendarWidgetRemoteViewsService : RemoteViewsService(), KoinComponent {
+ 
+     private val resourceProvider: ResourceProvider by inject()
+diff --git a/app/src/main/java/me/proton/android/calendar/ProtonCalendarBroadcastReceiver.kt b/app/src/main/java/me/proton/android/calendar/ProtonCalendarBroadcastReceiver.kt
+index 08e040bc..5cf83aa6 100644
+--- a/app/src/main/java/me/proton/android/calendar/ProtonCalendarBroadcastReceiver.kt
++++ b/app/src/main/java/me/proton/android/calendar/ProtonCalendarBroadcastReceiver.kt
+@@ -47,6 +47,7 @@ class ProtonCalendarBroadcastReceiver : BroadcastReceiver() {
+                     logger.e("null Context in ProtonCalendarBroadcastReceiver ACTION_BOOT_COMPLETED")
+                 } else {
+                     PeriodicCalendarWorker.setup(workManager, logger)
++                    CalendarWidget.scheduleNextMidnightUpdate(context)
+ 
+                     try {
+                         GlobalScope.launch(Dispatchers.IO) {
+diff --git a/app/src/test/java/me/proton/android/calendar/CalendarWidgetTest.kt b/app/src/test/java/me/proton/android/calendar/CalendarWidgetTest.kt
+new file mode 100644
+index 00000000..2d8f9c40
+--- /dev/null
++++ b/app/src/test/java/me/proton/android/calendar/CalendarWidgetTest.kt
+@@ -0,0 +1,64 @@
++package me.proton.android.calendar
++
++import android.app.AlarmManager
++import android.app.PendingIntent
++import android.appwidget.AppWidgetManager
++import android.widget.RemoteViews
++import assertk.assertThat
++import assertk.assertions.isEqualTo
++import io.mockk.mockk
++import io.mockk.verify
++import org.junit.jupiter.api.Test
++import java.time.Instant
++import java.time.ZoneId
++import java.time.ZonedDateTime
++
++internal class CalendarWidgetTest {
++
++    @Test
++    fun `event list refresh also refreshes header`() {
++        val widgetManager = mockk<AppWidgetManager>(relaxed = true)
++        val remoteViews = mockk<RemoteViews>(relaxed = true)
++        val widgetIds = intArrayOf(4, 8)
++
++        refreshWidgetHeaderAndEventList(widgetManager, widgetIds, remoteViews, "Thursday", "October 29")
++
++        verify { remoteViews.setTextViewText(R.id.tv_header_text, "Thursday") }
++        verify { remoteViews.setTextViewText(R.id.tv_main_text, "October 29") }
++        verify { widgetManager.partiallyUpdateAppWidget(widgetIds, remoteViews) }
++        verify { widgetManager.notifyAppWidgetViewDataChanged(widgetIds, R.id.lv_widget) }
++    }
++
++    @Test
++    fun `next midnight uses the current local time zone across daylight saving change`() {
++        val zone = ZoneId.of("America/New_York")
++        val now = ZonedDateTime.of(2026, 3, 7, 23, 30, 0, 0, zone)
++
++        val scheduled = ZonedDateTime.ofInstant(
++            Instant.ofEpochMilli(nextMidnightMillis(now)),
++            zone
++        )
++
++        assertThat(scheduled).isEqualTo(ZonedDateTime.of(2026, 3, 8, 0, 0, 0, 0, zone))
++    }
++
++    @Test
++    fun `midnight alarm is exact when access is available`() {
++        val alarmManager = mockk<AlarmManager>(relaxed = true)
++        val pendingIntent = mockk<PendingIntent>()
++
++        scheduleMidnightAlarm(alarmManager, pendingIntent, 1234L, canScheduleExactAlarm = true)
++
++        verify { alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, 1234L, pendingIntent) }
++    }
++
++    @Test
++    fun `midnight alarm falls back when exact alarm access is unavailable`() {
++        val alarmManager = mockk<AlarmManager>(relaxed = true)
++        val pendingIntent = mockk<PendingIntent>()
++
++        scheduleMidnightAlarm(alarmManager, pendingIntent, 1234L, canScheduleExactAlarm = false)
++
++        verify { alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, 1234L, pendingIntent) }
++    }
++}
+
